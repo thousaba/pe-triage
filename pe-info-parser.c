@@ -112,12 +112,146 @@ void parse_characteristics(uint16_t chars) {
     printf("]\n");
 }
 
+<<<<<<< HEAD
 uint32_t rva_to_offset(uint32_t rva, SECTION_HEADER* sections, uint16_t num_sections) {
     if (rva == 0) return INVALID_OFFSET;
     for (int i = 0; i < num_sections; i++) {
         if (rva >= sections[i].VirtualAddress && 
             rva < (sections[i].VirtualAddress + sections[i].VirtualSize)) {
             return (rva - sections[i].VirtualAddress) + sections[i].PointerToRawData;
+=======
+void parse_optional_header_details(OPTIONAL_HEADER64* opt, SECTION_HEADER* sections, uint16_t num_sections) {
+    printf("\n======================================================================\n");
+    printf("OPTIONAL HEADER ANALYSIS & MITIGATIONS\n");
+    printf("======================================================================\n");
+    printf("ImageBase               : 0x%016" PRIX64 "\n", opt->ImageBase);
+    printf("AddressOfEntryPoint     : 0x%08X (RVA)\n", opt->AddressOfEntryPoint);
+    printf("SizeOfImage             : 0x%08X Byte\n", opt->SizeOfImage);
+    printf("FileAlignment           : 0x%08X | SectionAlignment: 0x%08X\n", opt->FileAlignment, opt->SectionAlignment);
+    
+    if (opt->FileAlignment == opt->SectionAlignment) {
+        printf("  |-- [!] WARNING: FileAlignment == SectionAlignment (Possible Packer / Manual Shellcode Loader!)\n");
+    }
+
+    // Subsystem Check
+    printf("Subsystem               : %d ", opt->Subsystem);
+    switch (opt->Subsystem) {
+        case 1:  printf("[ Native Driver / Kernel ]\n"); break;
+        case 2:  printf("[ Windows GUI ]\n"); break;
+        case 3:  printf("[ Windows Console ]\n"); break;
+        default: printf("[ Unknown Subsystem ]\n"); break;
+    }
+
+    // Entry Point Section Check (RVA Scan)
+    int found_sec = 0;
+    for (int i = 0; i < num_sections; i++) {
+        uint32_t start = sections[i].VirtualAddress;
+        uint32_t end = start + sections[i].VirtualSize;
+
+        if (opt->AddressOfEntryPoint >= start && opt->AddressOfEntryPoint < end) {
+            char sec_name[9] = {0};
+            memcpy(sec_name, sections[i].Name, 8);
+            printf("Entry Point Section     : %s\n", sec_name);
+            
+            if (STRICMP(sec_name, ".text") != 0) {
+                printf("  |-- [!] CRITICAL: Entry Point is NOT in .text section! (Packer / Code Injection Flag!)\n");
+            }
+            found_sec = 1;
+            break;
+        }
+    }
+    if (!found_sec) {
+        printf("Entry Point Section     : [!] UNKNOWN (Entry Point points outside valid sections!)\n");
+    }
+
+    // DllCharacteristics Flag Check
+    uint16_t dll_char = opt->DllCharacteristics;
+    printf("DllCharacteristics      : 0x%04X\n", dll_char);
+    printf("  |-- ASLR (DYNAMIC_BASE) : %s\n", (dll_char & 0x0040) ? "ENABLED" : "DISABLED [!]");
+    printf("  |-- DEP (NX_COMPAT)     : %s\n", (dll_char & 0x0100) ? "ENABLED" : "DISABLED [!]");
+    printf("  |-- HIGH_ENTROPY_VA     : %s\n", (dll_char & 0x0020) ? "ENABLED" : "DISABLED");
+    printf("  |-- Guard CF            : %s\n", (dll_char & 0x4000) ? "ENABLED" : "DISABLED");
+    printf("  |-- Terminal Server     : %s\n", (dll_char & 0x8000) ? "AWARE" : "NO");
+}
+
+void parse_data_directories_details(OPTIONAL_HEADER64* opt) {
+    printf("\n======================================================================\n");
+    printf("DATA DIRECTORIES (CRITICAL INDEXES)\n");
+    printf("======================================================================\n");
+
+    const char* dir_names[16] = {
+        "EXPORT Directory",      // 0
+        "IMPORT Directory",      // 1
+        "RESOURCE Directory",    // 2
+        "EXCEPTION Directory",   // 3
+        "SECURITY Directory",    // 4
+        "BASERELOC Directory",   // 5
+        "DEBUG Directory",       // 6
+        "ARCHITECTURE",          // 7
+        "GLOBALPTR",             // 8
+        "TLS Directory",         // 9
+        "LOAD_CONFIG Directory", // 10
+        "BOUND_IMPORT",          // 11
+        "IAT Directory",         // 12
+        "DELAY_IMPORT Directory",// 13
+        "CLR_RUNTIME Header",    // 14
+        "RESERVED"               // 15
+    };
+
+    for (int i = 0; i < 16; i++) {
+        uint32_t rva = opt->DataDirectory[i].VirtualAddress;
+        uint32_t size = opt->DataDirectory[i].Size;
+
+        if (i == 0 || i == 1 || i == 2 || i == 4 || i == 5 || i == 9 || i == 10 || i == 13) {
+            printf("[%02d] %-23s : RVA 0x%08X | Size 0x%08X ", i, dir_names[i], rva, size);
+            
+            if (rva == 0 && size == 0) {
+                printf("[ NOT PRESENT ]\n");
+            } else {
+                printf("[ PRESENT ]");
+                
+                if (i == 4) { // Security (İmza)
+                    printf(" -> [!] Authenticode Signature Found!");
+                } else if (i == 9) { 
+                    printf(" -> [!] CRITICAL: TLS Callback Present (Anti-Debug/Early Exec)!");
+                } else if (i == 2 && size > 0x10000) { // Devasa .rsrc
+                    printf(" -> [!] WARNING: Large Resource Section (Possible Embedded Payload)!");
+                }
+                printf("\n");
+            }
+        }
+    }
+}
+
+#ifndef max
+#define max(a,b) (((a) > (b)) ? (a) : (b))
+#endif
+
+uint32_t rva_to_offset(uint32_t rva, SECTION_HEADER* sections, uint16_t num_sections, uint32_t size_of_headers, uint32_t file_size) {
+    // 0. Geçersiz RVA Kontrolü
+    if (rva == 0) return INVALID_OFFSET;
+
+    // 1. Header RVA Check
+    if (rva < size_of_headers) {
+        if (rva >= file_size) return INVALID_OFFSET; // Boundary check
+        return rva;
+    }
+
+    // 2. Section Table Scan
+    for (int i = 0; i < num_sections; i++) {
+        uint32_t virt_addr = sections[i].VirtualAddress;
+        uint32_t sec_size = max(sections[i].VirtualSize, sections[i].SizeOfRawData);
+
+        if (rva >= virt_addr && rva < (virt_addr + sec_size)) {
+            uint32_t delta = rva - virt_addr;
+            uint32_t raw_offset = sections[i].PointerToRawData + delta;
+
+            if (raw_offset >= file_size) {
+                return INVALID_OFFSET;
+            }
+
+            return raw_offset;
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
         }
     }
     return INVALID_OFFSET;
@@ -255,7 +389,12 @@ int main(int argc, char* argv[]) {
                sections[i].PointerToRawData, sections[i].Characteristics);
     }
 
+<<<<<<< HEAD
     // DataDirectory sinir kontrolu
+=======
+    parse_optional_header_details(&opt_hdr, sections, file_hdr.NumberOfSections);
+    parse_data_directories_details(&opt_hdr);
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
     uint32_t import_rva = 0;
     if (opt_hdr.NumberOfRvaAndSizes >= 2) {
         import_rva = opt_hdr.DataDirectory[1].VirtualAddress;
@@ -268,7 +407,11 @@ int main(int argc, char* argv[]) {
     if (import_rva == 0) {
         printf("[-] Static Import Table Not Found or RVA is 0!\n");
     } else {
+<<<<<<< HEAD
         uint32_t import_offset = rva_to_offset(import_rva, sections, file_hdr.NumberOfSections);
+=======
+        uint32_t import_offset = rva_to_offset(import_rva, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
         
         if (import_offset == INVALID_OFFSET || import_offset >= file_size) {
             printf("[-] Error: Import table points to an invalid offset!\n");
@@ -281,7 +424,11 @@ int main(int argc, char* argv[]) {
                 if (import_desc.Name == 0) break;
 
                 long current_pos = ftell(file);
+<<<<<<< HEAD
                 uint32_t name_offset = rva_to_offset(import_desc.Name, sections, file_hdr.NumberOfSections);
+=======
+                uint32_t name_offset = rva_to_offset(import_desc.Name, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
                 
                 if (name_offset != INVALID_OFFSET && name_offset < file_size) {
                     fseek(file, name_offset, SEEK_SET);
@@ -297,7 +444,11 @@ int main(int argc, char* argv[]) {
                     printf("\n[+] Imported DLL: %s\n", dll_name);
 
                     uint32_t thunk_rva = import_desc.OriginalFirstThunk ? import_desc.OriginalFirstThunk : import_desc.FirstThunk;
+<<<<<<< HEAD
                     uint32_t thunk_offset = rva_to_offset(thunk_rva, sections, file_hdr.NumberOfSections);
+=======
+                    uint32_t thunk_offset = rva_to_offset(thunk_rva, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
                     
                     if (thunk_offset != INVALID_OFFSET && thunk_offset < file_size) {
                         fseek(file, thunk_offset, SEEK_SET);
@@ -312,7 +463,11 @@ int main(int argc, char* argv[]) {
                                 printf("    |-- Ordinal: %" PRIu64 "\n", thunk_data & 0xFFFF);
                             } else {
                                 long inner_pos = ftell(file);
+<<<<<<< HEAD
                                 uint32_t thunk_val_offset = rva_to_offset((uint32_t)thunk_data, sections, file_hdr.NumberOfSections);
+=======
+                                uint32_t thunk_val_offset = rva_to_offset((uint32_t)thunk_data, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
                                 
                                 if (thunk_val_offset != INVALID_OFFSET && thunk_val_offset < file_size - 2) {
                                     uint32_t func_name_offset = thunk_val_offset + 2;
@@ -353,4 +508,8 @@ int main(int argc, char* argv[]) {
     free(sections);
     fclose(file);
     return 0;
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)

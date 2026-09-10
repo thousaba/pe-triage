@@ -1,4 +1,12 @@
+<<<<<<< HEAD
 # pe-triage
+=======
+<<<<<<< HEAD
+# Based Binary Analysis & PE Internals Utilities
+=======
+# pe-triage
+>>>>>>> 517dc8c (fix: harden PE info-parser against malformed files, fix integer overflows and infinite loops)
+>>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
 
 Small, dependency-free C tools for the first pass of static PE (Windows executable) triage. Each tool is a single `.c` file that parses the PE structures by hand — no `windows.h`, no third-party libraries — so they build with any C99 compiler on Windows or Linux.
 
