@@ -112,14 +112,6 @@ void parse_characteristics(uint16_t chars) {
     printf("]\n");
 }
 
-<<<<<<< HEAD
-uint32_t rva_to_offset(uint32_t rva, SECTION_HEADER* sections, uint16_t num_sections) {
-    if (rva == 0) return INVALID_OFFSET;
-    for (int i = 0; i < num_sections; i++) {
-        if (rva >= sections[i].VirtualAddress && 
-            rva < (sections[i].VirtualAddress + sections[i].VirtualSize)) {
-            return (rva - sections[i].VirtualAddress) + sections[i].PointerToRawData;
-=======
 void parse_optional_header_details(OPTIONAL_HEADER64* opt, SECTION_HEADER* sections, uint16_t num_sections) {
     printf("\n======================================================================\n");
     printf("OPTIONAL HEADER ANALYSIS & MITIGATIONS\n");
@@ -228,16 +220,13 @@ void parse_data_directories_details(OPTIONAL_HEADER64* opt) {
 #endif
 
 uint32_t rva_to_offset(uint32_t rva, SECTION_HEADER* sections, uint16_t num_sections, uint32_t size_of_headers, uint32_t file_size) {
-    // 0. Geçersiz RVA Kontrolü
     if (rva == 0) return INVALID_OFFSET;
 
-    // 1. Header RVA Check
     if (rva < size_of_headers) {
-        if (rva >= file_size) return INVALID_OFFSET; // Boundary check
+        if (rva >= file_size) return INVALID_OFFSET;
         return rva;
     }
 
-    // 2. Section Table Scan
     for (int i = 0; i < num_sections; i++) {
         uint32_t virt_addr = sections[i].VirtualAddress;
         uint32_t sec_size = max(sections[i].VirtualSize, sections[i].SizeOfRawData);
@@ -251,7 +240,6 @@ uint32_t rva_to_offset(uint32_t rva, SECTION_HEADER* sections, uint16_t num_sect
             }
 
             return raw_offset;
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
         }
     }
     return INVALID_OFFSET;
@@ -389,12 +377,9 @@ int main(int argc, char* argv[]) {
                sections[i].PointerToRawData, sections[i].Characteristics);
     }
 
-<<<<<<< HEAD
-    // DataDirectory sinir kontrolu
-=======
     parse_optional_header_details(&opt_hdr, sections, file_hdr.NumberOfSections);
     parse_data_directories_details(&opt_hdr);
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
+
     uint32_t import_rva = 0;
     if (opt_hdr.NumberOfRvaAndSizes >= 2) {
         import_rva = opt_hdr.DataDirectory[1].VirtualAddress;
@@ -407,11 +392,7 @@ int main(int argc, char* argv[]) {
     if (import_rva == 0) {
         printf("[-] Static Import Table Not Found or RVA is 0!\n");
     } else {
-<<<<<<< HEAD
-        uint32_t import_offset = rva_to_offset(import_rva, sections, file_hdr.NumberOfSections);
-=======
         uint32_t import_offset = rva_to_offset(import_rva, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
         
         if (import_offset == INVALID_OFFSET || import_offset >= file_size) {
             printf("[-] Error: Import table points to an invalid offset!\n");
@@ -424,11 +405,7 @@ int main(int argc, char* argv[]) {
                 if (import_desc.Name == 0) break;
 
                 long current_pos = ftell(file);
-<<<<<<< HEAD
-                uint32_t name_offset = rva_to_offset(import_desc.Name, sections, file_hdr.NumberOfSections);
-=======
                 uint32_t name_offset = rva_to_offset(import_desc.Name, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
                 
                 if (name_offset != INVALID_OFFSET && name_offset < file_size) {
                     fseek(file, name_offset, SEEK_SET);
@@ -444,11 +421,7 @@ int main(int argc, char* argv[]) {
                     printf("\n[+] Imported DLL: %s\n", dll_name);
 
                     uint32_t thunk_rva = import_desc.OriginalFirstThunk ? import_desc.OriginalFirstThunk : import_desc.FirstThunk;
-<<<<<<< HEAD
-                    uint32_t thunk_offset = rva_to_offset(thunk_rva, sections, file_hdr.NumberOfSections);
-=======
                     uint32_t thunk_offset = rva_to_offset(thunk_rva, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
                     
                     if (thunk_offset != INVALID_OFFSET && thunk_offset < file_size) {
                         fseek(file, thunk_offset, SEEK_SET);
@@ -463,11 +436,7 @@ int main(int argc, char* argv[]) {
                                 printf("    |-- Ordinal: %" PRIu64 "\n", thunk_data & 0xFFFF);
                             } else {
                                 long inner_pos = ftell(file);
-<<<<<<< HEAD
-                                uint32_t thunk_val_offset = rva_to_offset((uint32_t)thunk_data, sections, file_hdr.NumberOfSections);
-=======
                                 uint32_t thunk_val_offset = rva_to_offset((uint32_t)thunk_data, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
                                 
                                 if (thunk_val_offset != INVALID_OFFSET && thunk_val_offset < file_size - 2) {
                                     uint32_t func_name_offset = thunk_val_offset + 2;
@@ -508,8 +477,4 @@ int main(int argc, char* argv[]) {
     free(sections);
     fclose(file);
     return 0;
-<<<<<<< HEAD
 }
-=======
-}
->>>>>>> d379102 (feat(parser): harden RVA resolution logic and add PE Data Directories triage)
