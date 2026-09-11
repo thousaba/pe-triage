@@ -1,42 +1,26 @@
-# pe-triage
+# pe-info-parser
 
-Small, dependency-free C tools for the first pass of static PE (Windows executable) triage. Each tool is a single `.c` file that parses the PE structures by hand — no `windows.h`, no third-party libraries — so they build with any C99 compiler on Windows or Linux.
+A small, dependency-free C tool for the first pass of static PE (Windows executable) triage. [pe-info-parser.c](pe-info-parser.c) is a single file that parses the PE structures by hand — no `windows.h`, no third-party libraries — so it builds with any C99 compiler on Windows or Linux.
 
-| Tool | What it does |
-|---|---|
-| [pe-pattern-finder.c](pe-pattern-finder.c) | Sanity check: does the file start with `MZ`, and where is the `PE\0\0` signature? |
-| [pe-info-parser.c](pe-info-parser.c) | Dumps File Header, Section Table, Optional Header (mitigations, entry point), Data Directories and the Import Table; flags common packer / injector indicators |
-| [pe-section-strings-extractor.c](pe-section-strings-extractor.c) | `strings`-style ASCII + UTF-16LE extraction, with every hit mapped to the PE section it lives in |
+It dumps the File Header, Section Table, Optional Header (mitigations, entry point), Data Directories, the Export Table (EAT) and the Import Table, and flags common packer / injector indicators along the way.
 
 ## Build
 
 ```sh
-gcc -O2 -o pe-pattern-finder.exe            pe-pattern-finder.c
-gcc -O2 -o pe-info-parser.exe               pe-info-parser.c
-gcc -O2 -o pe-section-strings-extractor.exe pe-section-strings-extractor.c
+gcc -O2 -o pe-info-parser.exe pe-info-parser.c
 ```
 
-Tested with MinGW-W64 GCC on Windows. MSVC (`cl /O2 file.c`) and Linux GCC/Clang should work as well; the only platform-specific bit is `_stricmp`/`strcasecmp`, which is handled by an `#ifdef`.
+Tested with MinGW-W64 GCC on Windows. MSVC (`cl /O2 pe-info-parser.c`) and Linux GCC/Clang should work as well; the only platform-specific bit is `_stricmp`/`strcasecmp`, which is handled by an `#ifdef`.
 
 ## Usage
 
-### pe-pattern-finder
-
-Reads the whole file into memory, checks for the DOS `MZ` magic and scans the buffer for the `PE\0\0` signature. Useful for checking a blob that *might* be a PE (dumped memory, carved file, wrong extension).
-
 ```
-> pe-pattern-finder.exe sample.exe
-File Name: sample.exe
- File size: 70098 bytes
-PE Header (MZ) found at the beginning of the file.
-PE Signature (PE\0\0) found at offset: 128 (0x80)
+pe-info-parser.exe <target_exe>
 ```
 
-### pe-info-parser
+Walks `DOS_HEADER → PE signature → FILE_HEADER → OPTIONAL_HEADER64 → SECTION_HEADER[]`, then follows the Export and Import Directories through the section table with a manual RVA→file-offset translation. All offsets are bounds-checked against the file size, so a truncated or hand-crafted header produces an error instead of a crash or an infinite loop.
 
-Walks `DOS_HEADER → PE signature → FILE_HEADER → OPTIONAL_HEADER64 → SECTION_HEADER[]`, then follows the Import Directory through the section table with a manual RVA→file-offset translation. All offsets are bounds-checked against the file size, so a truncated or hand-crafted header produces an error instead of a crash or an infinite loop.
-
-The report has five blocks.
+The report has six blocks.
 
 **1. File header**
 
@@ -117,7 +101,37 @@ Only the triage-relevant indexes are listed (export, import, resource, security,
 - **TLS present** → TLS callbacks run before the entry point, a classic anti-debug / early-execution spot. Note that MinGW-built binaries (like the sample above) legitimately carry a TLS directory, so treat this as "look here", not "malicious".
 - **RESOURCE larger than 64 KiB** → possible embedded payload (droppers commonly stash the second stage in `.rsrc`).
 
-**5. Imports**
+**5. Exports**
+
+```
+======================================================================
+EXPORT DIRECTORY ANALYSIS (EAT)
+======================================================================
+Module Name             : VERSION.dll
+Base Ordinal            : 1
+Total Functions         : 17
+Named Functions         : 17
+----------------------------------------------------------------------
+[+] Printing first 15 exported functions:
+
+ORDINAL FUNC RVA   FOFFSET      FUNCTION NAME
+----------------------------------------------------------------------
+@1      0x000010F0 0x000010F0   GetFileVersionInfoA
+@2      0x00001110 0x00001110   GetFileVersionInfoByHandle
+@3      0x00001AB0 0x00001AB0   GetFileVersionInfoExA
+...
+@15     0x00005F87 0x00005F87   VerLanguageNameW
+... (2 more exports truncated)
+```
+
+Reads `IMAGE_EXPORT_DIRECTORY` (index 0 of the data directories) and walks the three parallel tables — `AddressOfNames`, `AddressOfNameOrdinals`, `AddressOfFunctions` — to resolve each named export to its real ordinal and code RVA. This is the block that matters for DLL samples: DLL side-loading payloads, hijacked system DLLs and reflective loaders tend to have a tell-tale export list (a single `DllMain`-style stub, `ReflectiveLoader`, or a cloned export set of the DLL they impersonate).
+
+- **Module Name** is the internal name stored in the export table. If it does not match the file name on disk, the DLL has been renamed — normal for side-loading kits.
+- **ORDINAL** is `Base + NameOrdinal[i]`, i.e. the number the DLL actually exports it under (`GetProcAddress` by ordinal works with this value).
+- **FOFFSET** is the function's raw file offset after RVA translation. An RVA that cannot be mapped to any section prints as `0xFFFFFFFF`.
+- Output is capped at the first 15 named exports; the remaining count is reported so you know when to open the file in a proper disassembler. A file without an export directory (most `.exe`s) prints a single `[-] No Export Directory Found` line.
+
+**6. Imports**
 
 ```
 ======================================================================
@@ -145,51 +159,12 @@ For `KERNEL32.dll` the import list is filtered to cut noise:
 
 Imports from every other DLL are listed in full. Ordinal-only imports are printed as `Ordinal: N`.
 
-### pe-section-strings-extractor
-
-```
-pe-section-strings-extractor.exe <file> [min_length]
-```
-
-`min_length` defaults to 4. Every hit is printed as `offset [section] [encoding] : text`.
-
-```
-> pe-section-strings-extractor.exe sample.exe 8
-======================================================================
-MY_STRINGS PARSER v2.0 | Hedef: sample.exe (70098 Bayt) | Min Len: 8
-======================================================================
-
-[+] --- BULUNAN ASCII STRING'LER --- [+]
-0x0000004D [HEADER/HEADER_GAP] [ASCII] : !This program cannot be run in DOS mode.
-0x00003E00 [.rdata    ] [ASCII] : libgcc_s_dw2-1.dll
-0x00003E13 [.rdata    ] [ASCII] : __register_frame_info
-0x00003F4A [.rdata    ] [ASCII] : LoadLibraryA
-0x00003F64 [.rdata    ] [ASCII] : VirtualAlloc
-...
-
-[+] --- BULUNAN UTF-16LE (WIDE) STRING'LER --- [+]
-...
-```
-
-The section column is what makes this more useful than plain `strings`: a URL or API name in `.rdata` is ordinary, the same thing sitting in `.text` or in an oddly named section is a signal. `HEADER/HEADER_GAP` means the offset is outside every section's raw data range (PE headers, padding, or an overlay appended after the last section).
-
-If the file is not a PE (no `MZ` / `PE\0\0`), section mapping is skipped and every string is reported as `UNKNOWN` — the tool still works as a generic string extractor.
-
 ## Limitations
 
-- `pe-info-parser` only supports **PE32+ (64-bit)** images. 32-bit PE32 files are rejected with an error rather than mis-parsed.
-- The import walker handles the classic Import Directory only. Delay-load imports, exports and the load config are reported as present/absent in the data directory block but not parsed.
+- Only **PE32+ (64-bit)** images are supported. 32-bit PE32 files are rejected with an error rather than mis-parsed.
+- The import walker handles the classic Import Directory only. Delay-load imports and the load config are reported as present/absent in the data directory block but not parsed.
+- The export walker lists **named** exports only (the first 15). Ordinal-only exports (`Total Functions > Named Functions`) are counted but not listed, and forwarded exports (`KERNEL32.HeapAlloc`-style strings in place of code) are printed with their RVA as if they were code.
 - Section names are truncated at 8 bytes as stored in the header; long names via the string table (`/4`, `/14`, … in GCC-built binaries) are not resolved.
-- All three tools load the entire file into memory. Fine for executables, not meant for multi-GB blobs.
-- String extraction uses `isprint()` on single bytes; the UTF-16 scanner only catches the Latin/ASCII range of wide strings.
 - The `[!]` markers are heuristics for prioritising what to look at next, not verdicts. Legitimate software trips several of them (see the TLS note above).
 
-## Layout
-
-```
-pe-pattern-finder.c              # MZ / PE\0\0 signature scan
-pe-info-parser.c                 # headers, sections, mitigations, data directories, imports
-pe-section-strings-extractor.c   # ASCII + UTF-16LE strings w/ section mapping
-```
-
-Compiled `.exe` files are ignored via `.gitignore`; rebuild from source with the commands above.
+Compiled `.exe` files are ignored via `.gitignore`; rebuild from source with the command above.

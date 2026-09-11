@@ -91,6 +91,20 @@ typedef struct {
     uint32_t FirstThunk;          
 } IMAGE_IMPORT_DESCRIPTOR;
 
+typedef struct {
+    uint32_t Characteristics;
+    uint32_t TimeDateStamp;
+    uint16_t MajorVersion;
+    uint16_t MinorVersion;
+    uint32_t Name;                 
+    uint32_t Base;                  
+    uint32_t NumberOfFunctions;    
+    uint32_t NumberOfNames;         
+    uint32_t AddressOfFunctions;    
+    uint32_t AddressOfNames;        
+    uint32_t AddressOfNameOrdinals; 
+} IMAGE_EXPORT_DIRECTORY;
+
 #pragma pack(pop)
 
 const char* get_machine_type(uint16_t machine) {
@@ -202,7 +216,7 @@ void parse_data_directories_details(OPTIONAL_HEADER64* opt) {
             } else {
                 printf("[ PRESENT ]");
                 
-                if (i == 4) { // Security (İmza)
+                if (i == 4) { 
                     printf(" -> [!] Authenticode Signature Found!");
                 } else if (i == 9) { 
                     printf(" -> [!] CRITICAL: TLS Callback Present (Anti-Debug/Early Exec)!");
@@ -214,6 +228,7 @@ void parse_data_directories_details(OPTIONAL_HEADER64* opt) {
         }
     }
 }
+
 
 #ifndef max
 #define max(a,b) (((a) > (b)) ? (a) : (b))
@@ -243,6 +258,99 @@ uint32_t rva_to_offset(uint32_t rva, SECTION_HEADER* sections, uint16_t num_sect
         }
     }
     return INVALID_OFFSET;
+}
+
+void parse_export_directory(FILE* file, OPTIONAL_HEADER64* opt, SECTION_HEADER* sections, uint16_t num_sections, uint32_t size_of_headers, uint32_t file_size) {
+    printf("\n======================================================================\n");
+    printf("EXPORT DIRECTORY ANALYSIS (EAT)\n");
+    printf("======================================================================\n");
+
+    uint32_t export_rva = opt->DataDirectory[0].VirtualAddress;
+    uint32_t export_size = opt->DataDirectory[0].Size;
+
+    if (export_rva == 0 || export_size == 0) {
+        printf("[-] No Export Directory Found (This binary does not export functions).\n");
+        return;
+    }
+
+    uint32_t export_offset = rva_to_offset(export_rva, sections, num_sections, size_of_headers, file_size);
+    if (export_offset == INVALID_OFFSET) {
+        printf("[-] Error: Export Directory RVA resolves to an invalid offset!\n");
+        return;
+    }
+
+    fseek(file, export_offset, SEEK_SET);
+    IMAGE_EXPORT_DIRECTORY exp_dir;
+    if (fread(&exp_dir, sizeof(IMAGE_EXPORT_DIRECTORY), 1, file) != 1) {
+        printf("[-] Error: Could not read Export Directory Structure!\n");
+        return;
+    }
+
+    uint32_t name_offset = rva_to_offset(exp_dir.Name, sections, num_sections, size_of_headers, file_size);
+    char module_name[128] = {0};
+    if (name_offset != INVALID_OFFSET && name_offset < file_size) {
+        fseek(file, name_offset, SEEK_SET);
+        int ch, idx = 0;
+        while ((ch = fgetc(file)) != 0 && ch != EOF && idx < 127) {
+            module_name[idx++] = (char)ch;
+        }
+    }
+
+    printf("Module Name             : %s\n", module_name[0] ? module_name : "UNKNOWN");
+    printf("Base Ordinal            : %d\n", exp_dir.Base);
+    printf("Total Functions         : %d\n", exp_dir.NumberOfFunctions);
+    printf("Named Functions         : %d\n", exp_dir.NumberOfNames);
+    printf("----------------------------------------------------------------------\n");
+
+    if (exp_dir.NumberOfNames == 0) return;
+
+    uint32_t functions_offset = rva_to_offset(exp_dir.AddressOfFunctions, sections, num_sections, size_of_headers, file_size);
+    uint32_t names_offset     = rva_to_offset(exp_dir.AddressOfNames, sections, num_sections, size_of_headers, file_size);
+    uint32_t ordinals_offset  = rva_to_offset(exp_dir.AddressOfNameOrdinals, sections, num_sections, size_of_headers, file_size);
+
+    if (functions_offset == INVALID_OFFSET || names_offset == INVALID_OFFSET || ordinals_offset == INVALID_OFFSET) {
+        printf("[-] Error: Export tables contain invalid RVAs!\n");
+        return;
+    }
+
+    int limit = exp_dir.NumberOfNames > 15 ? 15 : exp_dir.NumberOfNames;
+    printf("[+] Printing first %d exported functions:\n\n", limit);
+    printf("%-7s %-10s %-12s %s\n", "ORDINAL", "FUNC RVA", "FOFFSET", "FUNCTION NAME");
+    printf("----------------------------------------------------------------------\n");
+
+    for (uint32_t i = 0; i < limit; i++) {
+        uint32_t name_rva = 0;
+        uint16_t ordinal_idx = 0;
+
+        fseek(file, names_offset + (i * sizeof(uint32_t)), SEEK_SET);
+        fread(&name_rva, sizeof(uint32_t), 1, file);
+
+        fseek(file, ordinals_offset + (i * sizeof(uint16_t)), SEEK_SET);
+        fread(&ordinal_idx, sizeof(uint16_t), 1, file);
+
+        uint32_t func_rva = 0;
+        fseek(file, functions_offset + (ordinal_idx * sizeof(uint32_t)), SEEK_SET);
+        fread(&func_rva, sizeof(uint32_t), 1, file);
+
+        uint32_t str_offset = rva_to_offset(name_rva, sections, num_sections, size_of_headers, file_size);
+        char func_name[128] = {0};
+        if (str_offset != INVALID_OFFSET && str_offset < file_size) {
+            fseek(file, str_offset, SEEK_SET);
+            int ch, idx = 0;
+            while ((ch = fgetc(file)) != 0 && ch != EOF && idx < 127) {
+                func_name[idx++] = (char)ch;
+            }
+        }
+
+        uint32_t func_file_offset = rva_to_offset(func_rva, sections, num_sections, size_of_headers, file_size);
+        uint32_t actual_ordinal = exp_dir.Base + ordinal_idx;
+
+        printf("@%-6d 0x%08X 0x%08X   %s\n", actual_ordinal, func_rva, func_file_offset, func_name);
+    }
+
+    if (exp_dir.NumberOfNames > 15) {
+        printf("... (%d more exports truncated)\n", exp_dir.NumberOfNames - 15);
+    }
 }
 
 int is_crt_baseline_api(const char* api_name) {
@@ -379,6 +487,7 @@ int main(int argc, char* argv[]) {
 
     parse_optional_header_details(&opt_hdr, sections, file_hdr.NumberOfSections);
     parse_data_directories_details(&opt_hdr);
+    parse_export_directory(file, &opt_hdr, sections, file_hdr.NumberOfSections, opt_hdr.SizeOfHeaders, file_size);
 
     uint32_t import_rva = 0;
     if (opt_hdr.NumberOfRvaAndSizes >= 2) {
